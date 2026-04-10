@@ -1,14 +1,3 @@
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  NEXUS — "The SOVEREIGN" – GitHub Actions Build                          ║
-# ║  Compiles NEXUS.cu → NEXUS.exe using nvcc (CUDA) on a Windows Server     ║
-# ║  runner.                                                                 ║
-# ║                                                                          ║
-# ║  SETUP INSTRUCTIONS:                                                     ║
-# ║    1. Put NEXUS.cu in the root of your repo                              ║
-# ║    2. Save this file as .github/workflows/build.yml                      ║
-# ║    3. Push → Actions tab → "Build NEXUS" → download artifact             ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-
 name: Build NEXUS
 
 on:
@@ -30,53 +19,48 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Set up MSVC developer environment ───────────────────────────────
-      #    Provides the C++ host compiler (cl.exe) that nvcc relies on under the hood.
       - name: Set up MSVC x64 developer environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      # ── 3. Set up CUDA Toolkit ─────────────────────────────────────────────
-      #    Downloads and configures the NVIDIA CUDA Toolkit.
-      #    Using CUDA 11.4.0 as it is the last version to officially support Kepler (sm_35).
-      - name: Setup CUDA Toolkit
+      - name: Set up CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.17
         with:
           cuda: '11.4.0'
 
-      # ── 4. Compile ─────────────────────────────────────────────────────────
-      #    Flags explained:
-      #      -O3             – Full optimization for CUDA kernels
-      #      -arch=sm_35     – Target architecture: Kepler (GT 730 Kepler variant)
-      #      -cudart static  – Statically link the CUDA runtime
-      #      -Xcompiler      – Pass arguments to the MSVC host compiler:
-      #          /MT         – Statically link the C runtime (no redistributables needed)
-      #          /EHsc       – Standard C++ exception handling
-      #      -luser32 -lgdi32– Link Windows UI and GDI libraries for screen capture/overlay
+      - name: Verify CUDA toolchain
+        shell: pwsh
+        run: |
+          nvcc --version
+          where.exe nvcc
+
       - name: Compile NEXUS.cu
         shell: cmd
         run: |
-          nvcc -O3 -arch=sm_35 -cudart static NEXUS.cu -o NEXUS.exe -Xcompiler "/MT /EHsc /W3 /WX-" -luser32 -lgdi32
+          nvcc ^
+            -O3 ^
+            -arch=sm_35 ^
+            -cudart static ^
+            NEXUS.cu ^
+            -o NEXUS.exe ^
+            -Xcompiler "/MT /EHsc /W3 /WX-" ^
+            -luser32 -lgdi32
 
-      # ── 5. Quick sanity check ──────────────────────────────────────────────
       - name: Verify exe was produced
+        shell: pwsh
         run: |
           if (!(Test-Path "NEXUS.exe")) {
-            Write-Error "NEXUS.exe not found – compilation failed"
+            Write-Error "NEXUS.exe not found — compilation failed"
             exit 1
           }
-          $size = (Get-Item "NEXUS.exe").Length
-          Write-Host "NEXUS.exe size: $size bytes"
-          Write-Host "File info:"
-          (Get-Item "NEXUS.exe") | Select-Object Name, Length, LastWriteTime
-        shell: pwsh
+          $item = Get-Item "NEXUS.exe"
+          Write-Host "NEXUS.exe size: $($item.Length) bytes"
+          $item | Select-Object Name, Length, LastWriteTime
 
-      # ── 6. Upload artifact ─────────────────────────────────────────────────
       - name: Upload NEXUS.exe
         uses: actions/upload-artifact@v4
         with:
@@ -85,7 +69,6 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-  # ── Optional: auto-create a GitHub Release on version tags ─────────────────
   release:
     name: Publish GitHub Release
     needs: build
@@ -108,10 +91,10 @@ jobs:
           name: NEXUS SOVEREIGN ${{ github.ref_name }}
           body: |
             ## NEXUS SOVEREIGN ${{ github.ref_name }}
-            
+
             **VRAM-native Frame Generation Engine**
-            
+
             ### Requirements
             - Windows OS
-            - CUDA-compatible GPU (Kepler architecture or newer for this binary)
-            - Run as Administrator (recommended for hook/capture APIs)
+            - CUDA-compatible GPU
+            - Kepler-targeted build: `sm_35`

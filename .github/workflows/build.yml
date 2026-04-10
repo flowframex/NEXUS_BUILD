@@ -8,26 +8,74 @@ on:
 
 jobs:
   build:
-    name: "NEXUS sm_21 | CUDA 8.0 | Docker"
-    runs-on: ubuntu-latest
-    container:
-      image: nvidia/cuda:8.0-devel-ubuntu16.04
+    name: "NEXUS sm_21 | CUDA 8.0 | Windows"
+    runs-on: windows-latest
 
     steps:
-      - name: Install git
-        run: apt-get update -y && apt-get install -y git
-
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Compile NEXUS
-        run: |
-          nvcc -arch=sm_21 -O2 -Wno-deprecated-gpu-targets -o NEXUS_sm21 NEXUS.cu
+      - name: Install CUDA 8.0.61
+        uses: Jimver/cuda-toolkit@v0.2.29
+        id: cuda-toolkit
+        with:
+          cuda: '8.0.61'
+          method: 'local'
 
-      - name: Upload binary
+      - name: Patch host_config.h + wrap nvcc with OS spoof
+        shell: powershell
+        run: |
+          $bin = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}\bin"
+          $inc = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}\include"
+
+          # --- 1. Patch MSC_VER check ---
+          $hc = "$inc\host_config.h"
+          $t = Get-Content $hc -Raw
+          $t = $t -replace '(?s)(#if _MSC_VER > 1900\s*\r?\n[^\n]*\r?\n[^\n]*\r?\n)', '/* PATCHED */'
+          Set-Content $hc $t -NoNewline
+          Write-Host "host_config.h patched"
+
+          # --- 2. Rename nvcc.exe → nvcc_real.exe ---
+          Rename-Item "$bin\nvcc.exe" "$bin\nvcc_real.exe" -Force
+          Write-Host "nvcc.exe renamed"
+
+          # --- 3. Create nvcc.bat wrapper that injects __COMPAT_LAYER ---
+          # __COMPAT_LAYER=WIN81RTM makes Windows shim RtlGetVersion
+          # so nvcc_real.exe sees Windows 8.1 instead of Server 2022
+          $bat  = "@echo off`r`n"
+          $bat += "set __COMPAT_LAYER=WIN81RTM`r`n"
+          $bat += "`"$bin\nvcc_real.exe`" %*`r`n"
+          Set-Content "$bin\nvcc.bat" $bat -NoNewline
+          Write-Host "nvcc.bat wrapper created:"
+          Get-Content "$bin\nvcc.bat"
+
+      - name: Set up MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Verify tools
+        shell: cmd
+        run: |
+          nvcc --version
+          cl.exe 2>&1 | findstr /i "version"
+
+      - name: Compile NEXUS
+        shell: cmd
+        run: |
+          nvcc ^
+            -arch=sm_21 ^
+            -O2 ^
+            -Xcompiler /O2 ^
+            -Wno-deprecated-gpu-targets ^
+            -o NEXUS_sm21.exe ^
+            NEXUS.cu ^
+            -Xlinker /subsystem:windows
+
+      - name: Upload NEXUS_sm21.exe
         uses: actions/upload-artifact@v4
         with:
-          name: NEXUS-sm21-Fermi-GT730-Linux64
-          path: NEXUS_sm21
+          name: NEXUS-sm21-Fermi-GT730-Win64
+          path: NEXUS_sm21.exe
           if-no-files-found: error
           retention-days: 90

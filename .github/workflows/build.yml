@@ -19,30 +19,26 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      # ── 1. Checkout ─────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. MSVC (VS2022 on runner) ──────────────────────────
       - name: Set up MSVC x64 developer environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      # ── 3. CUDA 11.4 (Kepler-compatible) ────────────────────
       - name: Setup CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.17
         with:
           cuda: '11.4.0'
 
-      # ── 4. Verify toolchain ─────────────────────────────────
       - name: Verify CUDA toolchain
         shell: pwsh
         run: |
           nvcc --version
           where.exe nvcc
+          cl
 
-      # ── 5. Compile (FIXED) ──────────────────────────────────
       - name: Compile NEXUS.cu
         shell: cmd
         run: |
@@ -51,13 +47,13 @@ jobs:
             -arch=sm_35 ^
             -cudart static ^
             -allow-unsupported-compiler ^
+            -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH ^
             -Wno-deprecated-gpu-targets ^
             NEXUS.cu ^
             -o NEXUS.exe ^
-            -Xcompiler "/MT /EHsc /W3 /WX-" ^
+            -Xcompiler "/MT /EHsc /W3 /WX- /D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" ^
             -luser32 -lgdi32
 
-      # ── 6. Sanity check ─────────────────────────────────────
       - name: Verify exe was produced
         shell: pwsh
         run: |
@@ -69,7 +65,6 @@ jobs:
           Write-Host "NEXUS.exe size: $($item.Length) bytes"
           $item | Select-Object Name, Length, LastWriteTime
 
-      # ── 7. Upload artifact ──────────────────────────────────
       - name: Upload NEXUS.exe
         uses: actions/upload-artifact@v4
         with:
@@ -78,7 +73,6 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-  # ── Optional Release ────────────────────────────────────────
   release:
     name: Publish GitHub Release
     needs: build
@@ -107,4 +101,4 @@ jobs:
             ### Requirements
             - Windows OS
             - CUDA-compatible GPU
-            - Built for Kepler (sm_35)
+            - Built with CUDA 11.4 compatibility workaround

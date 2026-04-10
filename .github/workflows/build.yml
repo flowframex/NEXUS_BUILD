@@ -1,188 +1,117 @@
-name: Build NEXUS (sm_21 Fermi GT 730)
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  NEXUS — "The SOVEREIGN" – GitHub Actions Build                          ║
+# ║  Compiles NEXUS.cu → NEXUS.exe using nvcc (CUDA) on a Windows Server     ║
+# ║  runner.                                                                 ║
+# ║                                                                          ║
+# ║  SETUP INSTRUCTIONS:                                                     ║
+# ║    1. Put NEXUS.cu in the root of your repo                              ║
+# ║    2. Save this file as .github/workflows/build.yml                      ║
+# ║    3. Push → Actions tab → "Build NEXUS" → download artifact             ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+name: Build NEXUS
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ main, master ]
+    paths:
+      - 'NEXUS.cu'
+      - '.github/workflows/build.yml'
   pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'NEXUS.cu'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 jobs:
   build:
-    name: "NEXUS sm_21 | CUDA 8.0 | Windows + nvcc binary patch"
+    name: CUDA x64 – Release
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install CUDA 8.0.61
-        uses: Jimver/cuda-toolkit@v0.2.29
-        id: cuda-toolkit
-        with:
-          cuda: '8.0.61'
-          method: 'local'
-
-      # ── Patch 1: host_config.h  (MSC_VER > 1900 compile-time block) ──────
-      - name: Patch host_config.h
-        shell: powershell
-        run: |
-          $hc = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}\include\host_config.h"
-          $t  = Get-Content $hc -Raw
-          $t  = $t -replace '(?s)(#if _MSC_VER > 1900\s*\r?\n[^\n]*\r?\n[^\n]*\r?\n)', '/* CI-PATCH MSC_VER */'
-          Set-Content $hc $t -NoNewline
-          Write-Host "host_config.h patched"
-
-      # ── Patch 2: binary-patch nvcc.exe (RtlGetVersion OS-check NOP) ──────
-      #
-      #  nvcc 8.0 contains code roughly like:
-      #    ...version check...
-      #    Jcc  --> error_block          ; conditional jump to error
-      #    [normal compilation path]
-      #    error_block:
-      #    LEA  RCX, "Host compiler targets unsupported OS."
-      #    CALL nvcc_fatal               ; prints + exit(1)
-      #
-      #  Strategy:
-      #   1. Parse PE sections to find the RVA of the error string.
-      #   2. Scan .text for the x64 RIP-relative LEA that loads it.
-      #   3. Walk backward ≤200 bytes for the nearest conditional Jcc.
-      #   4. NOP that Jcc  →  we always fall through past the error block.
-      #   Fallback: if no Jcc found, NOP every CALL within 64 bytes of the LEA.
-      #
-      - name: Binary-patch nvcc.exe (NOP OS-version Jcc)
-        shell: python
-        run: |
-          import struct, sys, os
-
-          path = r"${{ steps.cuda-toolkit.outputs.CUDA_PATH }}\bin\nvcc.exe"
-          if not os.path.exists(path):
-              path = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\bin\nvcc.exe"
-          print(f"Patching: {path}")
-
-          with open(path, 'rb') as f:
-              data = bytearray(f.read())
-
-          # ── PE section table ─────────────────────────────────────────────
-          e_lfanew = struct.unpack_from('<I', data, 0x3C)[0]
-          nsec     = struct.unpack_from('<H', data, e_lfanew + 6)[0]
-          optsz    = struct.unpack_from('<H', data, e_lfanew + 20)[0]
-          sec0     = e_lfanew + 4 + 20 + optsz
-
-          secs = []
-          for i in range(nsec):
-              o = sec0 + i * 40
-              secs.append(dict(
-                  name  = data[o:o+8].rstrip(b'\x00').decode('ascii','replace'),
-                  va    = struct.unpack_from('<I', data, o + 12)[0],
-                  vsz   = struct.unpack_from('<I', data, o + 16)[0],
-                  ro    = struct.unpack_from('<I', data, o + 20)[0],
-                  rsz   = struct.unpack_from('<I', data, o + 16)[0],
-              ))
-
-          def off2rva(off):
-              for s in secs:
-                  if s['ro'] <= off < s['ro'] + s['rsz']:
-                      return s['va'] + (off - s['ro'])
-              return None
-
-          # ── Find error string ─────────────────────────────────────────────
-          msg = b'Host compiler targets unsupported OS.'
-          si  = data.find(msg)
-          assert si >= 0, "ERROR: string not found in binary!"
-          str_rva = off2rva(si)
-          print(f"  String  file=0x{si:08X}  rva=0x{str_rva:08X}")
-
-          # ── Find .text section (lowest VA, below string) ──────────────────
-          code_secs = [s for s in secs if s['va'] < str_rva and s['rsz'] > 0]
-          assert code_secs, "No code section found!"
-          text = min(code_secs, key=lambda s: abs(str_rva - s['va']))
-          ts, te = text['ro'], text['ro'] + text['rsz']
-          print(f"  .text   ro=0x{ts:08X}..0x{te:08X}  va=0x{text['va']:08X}")
-
-          # ── Scan .text for RIP-relative LEA referencing str_rva ──────────
-          # x64 pattern: REX(48|4C) 8D ModRM(mod=00,rm=101) disp32
-          refs = []
-          for i in range(ts, te - 7):
-              if data[i] in (0x48, 0x4C, 0x49, 0x4D) and data[i+1] == 0x8D:
-                  if (data[i+2] & 0xC7) == 0x05:
-                      disp = struct.unpack_from('<i', data, i + 3)[0]
-                      irva = off2rva(i)
-                      if irva and (irva + 7 + disp) == str_rva:
-                          refs.append(i)
-                          print(f"  LEA ref at file=0x{i:08X}")
-
-          assert refs, "ERROR: no LEA references to error string found!"
-
-          patched = 0
-          for ref in refs:
-              # ── Walk backward for Jcc ────────────────────────────────────
-              lo = max(ts, ref - 200)
-              for i in range(ref - 2, lo - 1, -1):
-                  b = data[i]
-                  # Short Jcc: 70..7F  disp8
-                  if 0x70 <= b <= 0x7F:
-                      print(f"  NOP short Jcc 0x{b:02X} at 0x{i:08X}")
-                      data[i]   = 0x90   # NOP
-                      data[i+1] = 0x90   # NOP
-                      patched += 1
-                      break
-                  # Near  Jcc: 0F 80..8F  disp32
-                  if 0x80 <= b <= 0x8F and i > 0 and data[i-1] == 0x0F:
-                      print(f"  NOP near Jcc 0F {b:02X} at 0x{i-1:08X}")
-                      for k in range(6):
-                          data[i - 1 + k] = 0x90
-                      patched += 1
-                      break
-
-          # ── Fallback: NOP every CALL near the LEA ────────────────────────
-          if patched == 0:
-              print("  Jcc not found; NOPing CALL(s) near LEA as fallback")
-              for ref in refs:
-                  for j in range(ref, min(ref + 64, te - 4)):
-                      if data[j] == 0xE8:                  # CALL rel32
-                          print(f"  NOP CALL at 0x{j:08X}")
-                          for k in range(5): data[j + k] = 0x90
-                          patched += 1
-                          # also NOP next CALL (likely exit())
-                          for j2 in range(j + 5, min(j + 48, te - 4)):
-                              if data[j2] == 0xE8:
-                                  print(f"  NOP 2nd CALL at 0x{j2:08X}")
-                                  for k in range(5): data[j2 + k] = 0x90
-                                  break
-                          break
-
-          assert patched > 0, "PATCH FAILED: nothing to NOP found!"
-
-          with open(path, 'wb') as f:
-              f.write(data)
-          print(f"  SUCCESS — {patched} location(s) patched.")
-
-      - name: Set up MSVC x64
+      # ── 2. Set up MSVC developer environment ───────────────────────────────
+      #    Provides the C++ host compiler (cl.exe) that nvcc relies on under the hood.
+      - name: Set up MSVC x64 developer environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Verify nvcc
-        shell: cmd
-        run: nvcc --version
+      # ── 3. Set up CUDA Toolkit ─────────────────────────────────────────────
+      #    Downloads and configures the NVIDIA CUDA Toolkit.
+      #    Using CUDA 11.4.0 as it is the last version to officially support Kepler (sm_35).
+      - name: Setup CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.17
+        with:
+          cuda: '11.4.0'
 
-      - name: Compile NEXUS
+      # ── 4. Compile ─────────────────────────────────────────────────────────
+      #    Flags explained:
+      #      -O3             – Full optimization for CUDA kernels
+      #      -arch=sm_35     – Target architecture: Kepler (GT 730 Kepler variant)
+      #      -cudart static  – Statically link the CUDA runtime
+      #      -Xcompiler      – Pass arguments to the MSVC host compiler:
+      #          /MT         – Statically link the C runtime (no redistributables needed)
+      #          /EHsc       – Standard C++ exception handling
+      #      -luser32 -lgdi32– Link Windows UI and GDI libraries for screen capture/overlay
+      - name: Compile NEXUS.cu
         shell: cmd
         run: |
-          nvcc ^
-            -arch=sm_21 ^
-            -O2 ^
-            -Xcompiler /O2 ^
-            -Wno-deprecated-gpu-targets ^
-            -o NEXUS_sm21.exe ^
-            NEXUS.cu ^
-            -Xlinker /subsystem:windows ^
-            -Xlinker /ENTRY:mainCRTStartup
+          nvcc -O3 -arch=sm_35 -cudart static NEXUS.cu -o NEXUS.exe -Xcompiler "/MT /EHsc /W3 /WX-" -luser32 -lgdi32
 
-      - name: Upload NEXUS_sm21.exe
+      # ── 5. Quick sanity check ──────────────────────────────────────────────
+      - name: Verify exe was produced
+        run: |
+          if (!(Test-Path "NEXUS.exe")) {
+            Write-Error "NEXUS.exe not found – compilation failed"
+            exit 1
+          }
+          $size = (Get-Item "NEXUS.exe").Length
+          Write-Host "NEXUS.exe size: $size bytes"
+          Write-Host "File info:"
+          (Get-Item "NEXUS.exe") | Select-Object Name, Length, LastWriteTime
+        shell: pwsh
+
+      # ── 6. Upload artifact ─────────────────────────────────────────────────
+      - name: Upload NEXUS.exe
         uses: actions/upload-artifact@v4
         with:
-          name: NEXUS-sm21-Fermi-GT730-Win64
-          path: NEXUS_sm21.exe
+          name: NEXUS-x64-Release
+          path: NEXUS.exe
+          retention-days: 30
           if-no-files-found: error
-          retention-days: 90
+
+  # ── Optional: auto-create a GitHub Release on version tags ─────────────────
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download compiled exe
+        uses: actions/download-artifact@v4
+        with:
+          name: NEXUS-x64-Release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: NEXUS.exe
+          name: NEXUS SOVEREIGN ${{ github.ref_name }}
+          body: |
+            ## NEXUS SOVEREIGN ${{ github.ref_name }}
+            
+            **VRAM-native Frame Generation Engine**
+            
+            ### Requirements
+            - Windows OS
+            - CUDA-compatible GPU (Kepler architecture or newer for this binary)
+            - Run as Administrator (recommended for hook/capture APIs)

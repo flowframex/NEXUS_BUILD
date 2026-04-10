@@ -1,15 +1,13 @@
 # ================================================================
 #  NEXUS v1.1 — GitHub Actions Build
 #  Target : GT 730 FERMI — CC 2.1 — sm_21
-#  CUDA   : 8.0.61  (last version supporting sm_2x / Fermi)
-#  Host CC: MSVC VS 2019  (already on runner — NO extra install)
+#  CUDA   : 8.0.61  (last version supporting Fermi / sm_2x)
+#  Runner : windows-latest  (= windows-2022, always available)
 #
-#  FIX vs previous version:
-#    OLD: choco install vcbuildtools  → hangs 16+ minutes on GH runners
-#    NEW: VS 2019 is pre-installed on windows-2019 runner.
-#         CUDA 8.0's host_config.h has a hard #error for cl.exe > VS2015.
-#         We patch that one line after CUDA installs → VS 2019 accepted.
-#         Total install time: ~4-6 min (just CUDA download + silent install)
+#  NOTE: windows-2019 is deprecated on GitHub — runners rarely spawn.
+#  windows-latest is windows-2022, has VS 2022 pre-installed.
+#  CUDA 8.0 rejects VS 2022 cl.exe via a hard #error in host_config.h.
+#  We patch that one line after install → compiler accepted, done.
 # ================================================================
 
 name: Build NEXUS  (sm_21 Fermi GT 730)
@@ -22,8 +20,8 @@ on:
 
 jobs:
   build-fermi-sm21:
-    name: "NEXUS → sm_21 | CUDA 8.0 | VS2019 patched | Windows"
-    runs-on: windows-2019
+    name: "NEXUS → sm_21 | CUDA 8.0 | Windows 2022"
+    runs-on: windows-latest          # windows-2022 — always available
 
     steps:
 
@@ -31,83 +29,71 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Activate VS 2019  (pre-installed — instant, no download)
-      #   Sets INCLUDE, LIB, PATH for x64 MSVC.
-      #   No Chocolatey. No waiting.
-      - name: Set up VS 2019 MSVC  (pre-installed on runner)
+      # ── 2. Activate MSVC  (VS 2022 — pre-installed, instant) ────
+      - name: Set up MSVC x64
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
       # ── 3. Download CUDA 8.0.61 network installer ────────────────
-      #   ~30 MB from NVIDIA's public CDN — no login needed.
+      #   Public NVIDIA CDN — no login required (~30 MB)
       - name: Download CUDA 8.0.61
         shell: powershell
         run: |
           $url = "https://developer.download.nvidia.com/compute/cuda/8.0/Prod2/network_installers/cuda_8.0.61_win10_network.exe"
           Write-Host "Downloading CUDA 8.0.61..."
           Invoke-WebRequest -Uri $url -OutFile "cuda_installer.exe" -UseBasicParsing
-          Write-Host "Downloaded: $([math]::Round((Get-Item cuda_installer.exe).Length/1MB,1)) MB"
+          Write-Host "Done — $([math]::Round((Get-Item cuda_installer.exe).Length/1MB,1)) MB"
 
-      # ── 4. Silent-install CUDA 8.0  (nvcc + cudart only) ────────
-      #   Skips GPU driver, PhysX, GFE — compiler only.
-      - name: Install CUDA 8.0  (nvcc + cudart)
+      # ── 4. Silent install  (nvcc + cudart only, no GPU driver) ───
+      - name: Install CUDA 8.0
         shell: powershell
         run: |
           $p = Start-Process ".\cuda_installer.exe" `
                  -ArgumentList "-s nvcc_8.0 cudart_8.0" `
                  -PassThru -Wait
-          if ($p.ExitCode -ne 0) { Write-Error "CUDA install failed: $($p.ExitCode)"; exit 1 }
+          if ($p.ExitCode -ne 0) { Write-Error "CUDA install failed: exit $($p.ExitCode)"; exit 1 }
           Write-Host "CUDA 8.0 installed."
 
-      # ── 5. Add CUDA 8.0 bin to PATH ──────────────────────────────
+      # ── 5. Add CUDA bin to PATH ───────────────────────────────────
       - name: Add CUDA 8.0 to PATH
         shell: powershell
         run: |
           $bin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\bin"
-          if (-not (Test-Path $bin)) { Write-Error "CUDA bin missing: $bin"; exit 1 }
+          if (-not (Test-Path $bin)) { Write-Error "CUDA bin not found: $bin"; exit 1 }
           Add-Content $env:GITHUB_PATH $bin
           Write-Host "PATH += $bin"
 
-      # ── 6. Patch host_config.h  ──────────────────────────────────
-      #   CUDA 8.0 has this hard #error in host_config.h:
+      # ── 6. Patch host_config.h ───────────────────────────────────
+      #   CUDA 8.0 has this block in host_config.h:
+      #
       #     #if _MSC_VER > 1900
       #       #error -- unsupported Microsoft Visual Studio version!
       #     #endif
-      #   MSC_VER 1900 = VS 2015.  VS 2019 = 1920.  So nvcc refuses.
-      #   We comment out that block — standard CI workaround, safe to do
-      #   because we are only compiling, not running on the CI machine.
-      - name: Patch CUDA 8.0 host_config.h  (allow VS 2019 cl.exe)
+      #
+      #   VS 2015 = 1900.  VS 2022 = 1930+.  Triggers the #error.
+      #   We comment it out — safe because we're only compiling, not
+      #   running CUDA on the CI machine itself.
+      - name: Patch host_config.h  (allow VS 2022 cl.exe)
         shell: powershell
         run: |
           $f = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\include\host_config.h"
-          if (-not (Test-Path $f)) { Write-Error "host_config.h not found: $f"; exit 1 }
-
+          if (-not (Test-Path $f)) { Write-Error "Not found: $f"; exit 1 }
           $txt = Get-Content $f -Raw
-
-          # The block that rejects VS > 2015:
-          #   #if _MSC_VER > 1900
-          #     #error -- unsupported Microsoft Visual Studio version!...
-          #   #endif
           $txt = $txt -replace `
             '(#if _MSC_VER > 1900\s*\r?\n\s*#error[^\r\n]*\r?\n\s*#endif)', `
-            '/* CI patch: MSC_VER upper-bound removed — VS 2019 allowed */'
-
+            '/* CI patch: MSC_VER upper-bound removed */'
           Set-Content $f $txt -NoNewline
-          Write-Host "host_config.h patched OK."
+          Write-Host "host_config.h patched."
 
-      # ── 7. Verify toolchain ──────────────────────────────────────
+      # ── 7. Verify ────────────────────────────────────────────────
       - name: Verify nvcc + cl.exe
         shell: cmd
         run: |
           nvcc --version
           cl.exe 2>&1 | findstr /i "version"
 
-      # ── 8. Compile NEXUS.cu → NEXUS_sm21.exe ────────────────────
-      #   -arch=sm_21              Fermi CC2.1  (GT 730 old die)
-      #   -O2 / -Xcompiler /O2     optimise device + host code
-      #   -Xlinker /subsystem:windows   WIN32 GUI, no console popup
-      #   gdi32/user32/kernel32 are auto-linked by MSVC
+      # ── 8. Compile ───────────────────────────────────────────────
       - name: Compile NEXUS  (sm_21 Fermi)
         shell: cmd
         run: |

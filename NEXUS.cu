@@ -949,7 +949,7 @@ static void query_cuda(char *buf, int len) {
     cudaError_t err = cudaGetDeviceCount(&cnt);
     if (err != cudaSuccess || cnt == 0) {
         _snprintf(buf, len,
-            "CUDA: No device — %s  [driver too old? need >= 441.22]",
+            "CUDA: No device — %s  [driver too old? need >= 367.48]",
             cudaGetErrorString(err));
         g_cuda_ok = false;
         return;
@@ -957,22 +957,24 @@ static void query_cuda(char *buf, int len) {
     cudaDeviceProp p;
     cudaGetDeviceProperties(&p, 0);
 
-    // This binary targets sm_35 (Kepler CC3.5+).
-    // Fermi (CC2.x) needs a local build with CUDA 8.0 -arch=sm_21.
+    // Binary targets sm_21 (Fermi CC2.1).
+    // Any GPU CC2.1 or newer can execute sm_21 code.
     int cc = p.major * 10 + p.minor;
-    if (cc < 35) {
+    if (cc < 21) {
         _snprintf(buf, len,
-            "CUDA: %s CC%d.%d — INCOMPATIBLE (binary=sm_35, need CC3.5+; Fermi needs local CUDA 8.0 build)",
+            "CUDA: %s CC%d.%d — INCOMPATIBLE (binary=sm_21, need CC2.1+)",
             p.name, p.major, p.minor);
         g_cuda_ok = false;
         return;
     }
 
     g_cuda_ok = true;
-    // Kepler GK208 = 192 cores/SM; Fermi = 48; Maxwell/Pascal = 128
-    int cores_per_sm = (p.major == 2) ? 48
-                     : (p.major == 3) ? 192
-                     : 128;
+    // Cores per SM by architecture
+    int cores_per_sm = (p.major == 2) ? 48    // Fermi GF10x
+                     : (p.major == 3) ? 192   // Kepler GK2xx
+                     : (p.major == 5) ? 128   // Maxwell
+                     : (p.major == 6) ? 128   // Pascal
+                     : 64;                    // Turing/Ampere (conservative)
     _snprintf(buf, len,
         "CUDA OK: %s  CC%d.%d  %d MB  (~%d cores)",
         p.name, p.major, p.minor,
@@ -1039,8 +1041,8 @@ static LRESULT CALLBACK CtrlProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         mks("──────────────────────────────────────────────────────────────", 10, y, 640, 14); y+=16;
         mks("  WEIGHTS  w_w=c_div*c_lk   w_t=(1-jerk)*h   w_s=jerk+lam*(1-h)+ofc", 10, y, 640, 16); y+=16;
         mks("──────────────────────────────────────────────────────────────", 10, y, 640, 14); y+=16;
-        mks("  Target: GT 730 GK208 CC3.5 (Kepler) / i3 2120 — VRAM-native — No RTX",     10, y, 640, 16); y+=16;
-        mks("  Build:  CUDA 10.2  sm_35  driver>=441.22  Pipeline: GDI->pinned->VRAM->LK(shm)->SOVEREIGN->GDI", 10, y, 640, 16);
+        mks("  Target: GT 730 GF108 CC2.1 (Fermi) / i3 2120 — VRAM-native — No RTX",     10, y, 640, 16); y+=16;
+        mks("  Build:  CUDA 8.0  sm_21  driver>=367.48  Pipeline: GDI->pinned->VRAM->LK(shm)->SOVEREIGN->GDI", 10, y, 640, 16);
 
         SetTimer(hwnd, ID_TIMER, 500, NULL);
         return 0;
@@ -1081,12 +1083,13 @@ static LRESULT CALLBACK CtrlProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!g_cuda_ok) {
                 MessageBoxA(hwnd,
                     "No compatible CUDA device found.\nMake sure:\n"
-                    "  1. NVIDIA driver is >= 441.22 (required for CUDA 10.2)\n"
-                    "     Get it at: nvidia.com/drivers\n"
-                    "  2. GPU is Kepler CC3.5+ (GT 730 GK208 / GTX 650 or newer)\n"
-                    "  3. NEXUS.exe was built with CUDA 10.2 -arch=sm_35\n\n"
-                    "If you have a Fermi GPU (CC2.1, e.g. GT 730 GF108 <=2GB):\n"
-                    "  Build locally with CUDA 8.0 and -arch=sm_21",
+                    "  1. NVIDIA driver is >= 367.48\n"
+                    "     (any GT 730 Fermi driver from 2014+ works)\n"
+                    "  2. GPU is Fermi CC2.1 or newer\n"
+                    "     (GT 730 GF108, GT 630, GTX 5xx series etc.)\n"
+                    "  3. NEXUS.exe was built with CUDA 8.0 -arch=sm_21\n\n"
+                    "If your driver is too old, update at: nvidia.com/drivers\n"
+                    "Search: GeForce GT 730 / Windows 10 64-bit",
                     "CUDA Error", MB_OK | MB_ICONERROR);
                 break;
             }

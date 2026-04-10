@@ -1,15 +1,3 @@
-# ================================================================
-#  NEXUS v1.1 — GitHub Actions Build
-#  Target : GT 730 FERMI — CC 2.1 — sm_21
-#  CUDA   : 8.0.61  (last version supporting Fermi / sm_2x)
-#  Runner : windows-latest  (= windows-2022, always available)
-#
-#  NOTE: windows-2019 is deprecated on GitHub — runners rarely spawn.
-#  windows-latest is windows-2022, has VS 2022 pre-installed.
-#  CUDA 8.0 rejects VS 2022 cl.exe via a hard #error in host_config.h.
-#  We patch that one line after install → compiler accepted, done.
-# ================================================================
-
 name: Build NEXUS  (sm_21 Fermi GT 730)
 
 on:
@@ -20,65 +8,59 @@ on:
 
 jobs:
   build-fermi-sm21:
-    name: "NEXUS → sm_21 | CUDA 8.0 | Windows 2022"
-    runs-on: windows-latest          # windows-2022 — always available
+    name: "NEXUS -> sm_21 | CUDA 8.0 | Windows 2022"
+    runs-on: windows-latest
 
     steps:
 
-      # ── 1. Checkout ──────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Activate MSVC  (VS 2022 — pre-installed, instant) ────
       - name: Set up MSVC x64
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      # ── 3. Download CUDA 8.0.61 network installer ────────────────
-      #   Public NVIDIA CDN — no login required (~30 MB)
       - name: Download CUDA 8.0.61
         shell: powershell
         run: |
           $url = "https://developer.download.nvidia.com/compute/cuda/8.0/Prod2/network_installers/cuda_8.0.61_win10_network.exe"
           Write-Host "Downloading CUDA 8.0.61..."
           Invoke-WebRequest -Uri $url -OutFile "cuda_installer.exe" -UseBasicParsing
-          Write-Host "Done — $([math]::Round((Get-Item cuda_installer.exe).Length/1MB,1)) MB"
+          $mb = [math]::Round((Get-Item cuda_installer.exe).Length / 1MB, 1)
+          Write-Host "Done - $mb MB"
 
-      # ── 4. Silent install  (nvcc + cudart only, no GPU driver) ───
-      - name: Install CUDA 8.0
+      - name: Install CUDA 8.0  (nvcc + cudart only)
         shell: powershell
         run: |
           $p = Start-Process ".\cuda_installer.exe" `
                  -ArgumentList "-s nvcc_8.0 cudart_8.0" `
                  -PassThru -Wait
-          if ($p.ExitCode -ne 0) { Write-Error "CUDA install failed: exit $($p.ExitCode)"; exit 1 }
+          if ($p.ExitCode -ne 0) {
+            Write-Error "CUDA install failed with exit code $($p.ExitCode)"
+            exit 1
+          }
           Write-Host "CUDA 8.0 installed."
 
-      # ── 5. Add CUDA bin to PATH ───────────────────────────────────
       - name: Add CUDA 8.0 to PATH
         shell: powershell
         run: |
           $bin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\bin"
-          if (-not (Test-Path $bin)) { Write-Error "CUDA bin not found: $bin"; exit 1 }
+          if (-not (Test-Path $bin)) {
+            Write-Error "CUDA bin not found: $bin"
+            exit 1
+          }
           Add-Content $env:GITHUB_PATH $bin
           Write-Host "PATH += $bin"
 
-      # ── 6. Patch host_config.h ───────────────────────────────────
-      #   CUDA 8.0 has this block in host_config.h:
-      #
-      #     #if _MSC_VER > 1900
-      #       #error -- unsupported Microsoft Visual Studio version!
-      #     #endif
-      #
-      #   VS 2015 = 1900.  VS 2022 = 1930+.  Triggers the #error.
-      #   We comment it out — safe because we're only compiling, not
-      #   running CUDA on the CI machine itself.
       - name: Patch host_config.h  (allow VS 2022 cl.exe)
         shell: powershell
         run: |
           $f = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\include\host_config.h"
-          if (-not (Test-Path $f)) { Write-Error "Not found: $f"; exit 1 }
+          if (-not (Test-Path $f)) {
+            Write-Error "Not found: $f"
+            exit 1
+          }
           $txt = Get-Content $f -Raw
           $txt = $txt -replace `
             '(#if _MSC_VER > 1900\s*\r?\n\s*#error[^\r\n]*\r?\n\s*#endif)', `
@@ -86,14 +68,12 @@ jobs:
           Set-Content $f $txt -NoNewline
           Write-Host "host_config.h patched."
 
-      # ── 7. Verify ────────────────────────────────────────────────
       - name: Verify nvcc + cl.exe
         shell: cmd
         run: |
           nvcc --version
           cl.exe 2>&1 | findstr /i "version"
 
-      # ── 8. Compile ───────────────────────────────────────────────
       - name: Compile NEXUS  (sm_21 Fermi)
         shell: cmd
         run: |
@@ -105,7 +85,6 @@ jobs:
             NEXUS.cu ^
             -Xlinker /subsystem:windows
 
-      # ── 9. Upload artifact ───────────────────────────────────────
       - name: Upload NEXUS_sm21.exe
         uses: actions/upload-artifact@v4
         with:

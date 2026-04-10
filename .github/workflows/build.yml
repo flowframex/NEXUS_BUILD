@@ -8,8 +8,8 @@ on:
 
 jobs:
   build-fermi-sm21:
-    name: "NEXUS sm_21 | CUDA 8.0 | Ubuntu"
-    runs-on: ubuntu-latest
+    name: "NEXUS sm_21 | CUDA 8.0 | Windows Latest + Shim"
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
@@ -20,25 +20,66 @@ jobs:
         id: cuda-toolkit
         with:
           cuda: '8.0.61'
-          method: 'network'
-          linux-local-args: '["--toolkit"]'
+          method: 'local'
 
-      - name: Verify nvcc
-        run: nvcc --version
+      - name: Patch host_config.h (MSC_VER upper bound)
+        shell: powershell
+        run: |
+          $cudaPath = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+          if (-not (Test-Path $cudaPath)) {
+            $cudaPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0"
+          }
+          $hc = "$cudaPath\include\host_config.h"
+          $t = Get-Content $hc -Raw
+          $t = $t -replace '(?s)(#if _MSC_VER > 1900\s*\r?\n\s*#error[^\r\n]*\r?\n\s*#endif)', `
+                            '/* CI-PATCH: MSC_VER check removed */'
+          Set-Content $hc $t -NoNewline
+          Write-Host "host_config.h patched."
+
+      - name: Apply AppCompat shim to nvcc.exe (spoof OS as Win 8.1)
+        shell: powershell
+        run: |
+          # This makes nvcc.exe see Windows 8.1 via GetVersionEx(),
+          # bypassing CUDA 8.0's "unsupported OS" fatal check on Server 2022
+          $cudaPath = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+          if (-not (Test-Path $cudaPath)) {
+            $cudaPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0"
+          }
+          $nvccExe = "$cudaPath\bin\nvcc.exe"
+          $regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
+          if (-not (Test-Path $regPath)) {
+            New-Item -Path $regPath -Force | Out-Null
+          }
+          New-ItemProperty -Path $regPath -Name $nvccExe -Value "~ WIN81RTM" -PropertyType String -Force
+          Write-Host "AppCompat shim applied to: $nvccExe"
+
+      - name: Set up MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Verify tools
+        shell: cmd
+        run: |
+          nvcc --version
+          cl.exe 2>&1 | findstr /i "version"
 
       - name: Compile NEXUS (sm_21 Fermi)
+        shell: cmd
         run: |
-          nvcc \
-            -arch=sm_21 \
-            -O2 \
-            -Wno-deprecated-gpu-targets \
-            -o NEXUS_sm21 \
-            NEXUS.cu
+          nvcc ^
+            -arch=sm_21 ^
+            -O2 ^
+            -Xcompiler /O2 ^
+            -Wno-deprecated-gpu-targets ^
+            -o NEXUS_sm21.exe ^
+            NEXUS.cu ^
+            -Xlinker /subsystem:windows
 
-      - name: Upload NEXUS_sm21
+      - name: Upload NEXUS_sm21.exe
         uses: actions/upload-artifact@v4
         with:
-          name: NEXUS-sm21-Fermi-GT730-Linux64
-          path: NEXUS_sm21
+          name: NEXUS-sm21-Fermi-GT730-Win64
+          path: NEXUS_sm21.exe
           if-no-files-found: error
           retention-days: 90

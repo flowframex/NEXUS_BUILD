@@ -792,6 +792,14 @@ static void generate_frame_cuda(
         d_F2.ptr, d_F1.ptr,
         d_flow.ptr, d_flow.qual,
         W, H);
+    {
+        cudaError_t e = cudaGetLastError();
+        if (e != cudaSuccess) {
+            // Kernel failed to launch — log and bail (prevents corrupted output)
+            fprintf(stderr, "[NEXUS] LK kernel error: %s\n", cudaGetErrorString(e));
+            return;
+        }
+    }
 
     // Pass 2: SOVEREIGN synthesis
     nexus_sovereign<<<grid, block>>>(
@@ -799,8 +807,15 @@ static void generate_frame_cuda(
         d_flow.ptr, d_flow.qual,
         d_result.ptr,
         W, H);
+    {
+        cudaError_t e = cudaGetLastError();
+        if (e != cudaSuccess) {
+            fprintf(stderr, "[NEXUS] SOVEREIGN kernel error: %s\n", cudaGetErrorString(e));
+            return;
+        }
+    }
 
-    // v1.1: synchronise via event rather than blocking the host
+    // Synchronise — waits for both kernels to finish before download
     cudaDeviceSynchronize();
 }
 
@@ -933,18 +948,36 @@ static void query_cuda(char *buf, int len) {
     int cnt = 0;
     cudaError_t err = cudaGetDeviceCount(&cnt);
     if (err != cudaSuccess || cnt == 0) {
-        _snprintf(buf, len, "CUDA: No device — %s", cudaGetErrorString(err));
+        _snprintf(buf, len,
+            "CUDA: No device — %s  [driver too old? need >= 441.22]",
+            cudaGetErrorString(err));
         g_cuda_ok = false;
         return;
     }
     cudaDeviceProp p;
     cudaGetDeviceProperties(&p, 0);
+
+    // This binary targets sm_35 (Kepler CC3.5+).
+    // Fermi (CC2.x) needs a local build with CUDA 8.0 -arch=sm_21.
+    int cc = p.major * 10 + p.minor;
+    if (cc < 35) {
+        _snprintf(buf, len,
+            "CUDA: %s CC%d.%d — INCOMPATIBLE (binary=sm_35, need CC3.5+; Fermi needs local CUDA 8.0 build)",
+            p.name, p.major, p.minor);
+        g_cuda_ok = false;
+        return;
+    }
+
     g_cuda_ok = true;
+    // Kepler GK208 = 192 cores/SM; Fermi = 48; Maxwell/Pascal = 128
+    int cores_per_sm = (p.major == 2) ? 48
+                     : (p.major == 3) ? 192
+                     : 128;
     _snprintf(buf, len,
         "CUDA OK: %s  CC%d.%d  %d MB  (~%d cores)",
         p.name, p.major, p.minor,
         (int)(p.totalGlobalMem / (1024 * 1024)),
-        p.multiProcessorCount * 48);
+        p.multiProcessorCount * cores_per_sm);
 }
 
 // ================================================================
@@ -1006,8 +1039,8 @@ static LRESULT CALLBACK CtrlProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         mks("──────────────────────────────────────────────────────────────", 10, y, 640, 14); y+=16;
         mks("  WEIGHTS  w_w=c_div*c_lk   w_t=(1-jerk)*h   w_s=jerk+lam*(1-h)+ofc", 10, y, 640, 16); y+=16;
         mks("──────────────────────────────────────────────────────────────", 10, y, 640, 14); y+=16;
-        mks("  Target: GT 730 CC2.1 / i3 2120 — VRAM-native — No RTX",     10, y, 640, 16); y+=16;
-        mks("  Pipeline: GDI->pinned->VRAM->LK(shm)->SOVEREIGN->GDI",      10, y, 640, 16);
+        mks("  Target: GT 730 GK208 CC3.5 (Kepler) / i3 2120 — VRAM-native — No RTX",     10, y, 640, 16); y+=16;
+        mks("  Build:  CUDA 10.2  sm_35  driver>=441.22  Pipeline: GDI->pinned->VRAM->LK(shm)->SOVEREIGN->GDI", 10, y, 640, 16);
 
         SetTimer(hwnd, ID_TIMER, 500, NULL);
         return 0;
@@ -1047,11 +1080,13 @@ static LRESULT CALLBACK CtrlProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_START:
             if (!g_cuda_ok) {
                 MessageBoxA(hwnd,
-                    "No CUDA device found.\nMake sure:\n"
-                    "  1. CUDA Toolkit 8.0 is installed (Fermi needs <=8.0)\n"
-                    "  2. GPU driver is up to date\n"
-                    "  3. NEXUS.exe was built with -arch=sm_21\n"
-                    "     (or sm_35 for Kepler GT 730)",
+                    "No compatible CUDA device found.\nMake sure:\n"
+                    "  1. NVIDIA driver is >= 441.22 (required for CUDA 10.2)\n"
+                    "     Get it at: nvidia.com/drivers\n"
+                    "  2. GPU is Kepler CC3.5+ (GT 730 GK208 / GTX 650 or newer)\n"
+                    "  3. NEXUS.exe was built with CUDA 10.2 -arch=sm_35\n\n"
+                    "If you have a Fermi GPU (CC2.1, e.g. GT 730 GF108 <=2GB):\n"
+                    "  Build locally with CUDA 8.0 and -arch=sm_21",
                     "CUDA Error", MB_OK | MB_ICONERROR);
                 break;
             }

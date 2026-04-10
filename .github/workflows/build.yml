@@ -8,12 +8,10 @@ on:
 
 jobs:
   build-fermi-sm21:
-    name: "NEXUS sm_21 | CUDA 8.0 | Windows 2019"
-    runs-on: windows-2019            # ← KEY FIX: 2019 = Win build 17763, CUDA 8.0 accepts it
-                                     #   windows-2022/latest = build 20348, too new → fatal error
+    name: "NEXUS sm_21 | CUDA 8.0 | Ubuntu"
+    runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -22,73 +20,25 @@ jobs:
         id: cuda-toolkit
         with:
           cuda: '8.0.61'
-          method: 'local'
+          method: 'network'
+          linux-local-args: '["--toolkit"]'
 
-      # Patch 1 — host_config.h: remove MSC_VER > 1900 upper-bound (VS 2022 uses 1930+)
-      # Patch 2 — scan ALL headers for any "unsupported Windows" #error blocks and nuke them
-      - name: Patch CUDA 8.0 headers (compiler + OS checks)
-        shell: powershell
-        run: |
-          $cudaPath = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
-          if (-not (Test-Path $cudaPath)) {
-            $cudaPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0"
-          }
-          Write-Host "CUDA root: $cudaPath"
-
-          # --- Patch 1: host_config.h MSC_VER upper bound ---
-          $hc = "$cudaPath\include\host_config.h"
-          if (Test-Path $hc) {
-            $t = Get-Content $hc -Raw
-            $t = $t -replace '(?s)(#if _MSC_VER > 1900\s*\r?\n\s*#error[^\r\n]*\r?\n\s*#endif)', `
-                              '/* CI-PATCH: MSC_VER upper-bound removed */'
-            Set-Content $hc $t -NoNewline
-            Write-Host "Patched: host_config.h"
-          } else {
-            Write-Host "WARNING: host_config.h not found at $hc"
-          }
-
-          # --- Patch 2: sweep all .h files for Windows OS #error guards ---
-          $headers = Get-ChildItem "$cudaPath\include" -Filter "*.h" -Recurse -ErrorAction SilentlyContinue
-          foreach ($h in $headers) {
-            $t = Get-Content $h.FullName -Raw -ErrorAction SilentlyContinue
-            if ($null -eq $t) { continue }
-            # Match patterns like:  #if ... \n #error ...unsupported...windows... \n #endif
-            if ($t -imatch '#error[^\n]*unsupported[^\n]*(os|windows|operating)') {
-              Write-Host "Patching OS guard in: $($h.Name)"
-              $t = $t -replace '(?si)(#if[^\n]*\n[^#]*#error[^\n]*(unsupported[^\n]*(os|windows|operating)|os[^\n]*unsupported)[^\n]*\n[^#]*#endif)', `
-                                '/* CI-PATCH: OS check removed */'
-              Set-Content $h.FullName $t -NoNewline
-            }
-          }
-          Write-Host "All patches done."
-
-      - name: Set up MSVC x64
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Verify tools
-        shell: cmd
-        run: |
-          nvcc --version
-          cl.exe 2>&1 | findstr /i "version"
+      - name: Verify nvcc
+        run: nvcc --version
 
       - name: Compile NEXUS (sm_21 Fermi)
-        shell: cmd
         run: |
-          nvcc ^
-            -arch=sm_21 ^
-            -O2 ^
-            -Xcompiler /O2 ^
-            -Wno-deprecated-gpu-targets ^
-            -o NEXUS_sm21.exe ^
-            NEXUS.cu ^
-            -Xlinker /subsystem:windows
+          nvcc \
+            -arch=sm_21 \
+            -O2 \
+            -Wno-deprecated-gpu-targets \
+            -o NEXUS_sm21 \
+            NEXUS.cu
 
-      - name: Upload NEXUS_sm21.exe
+      - name: Upload NEXUS_sm21
         uses: actions/upload-artifact@v4
         with:
-          name: NEXUS-sm21-Fermi-GT730-Win64
-          path: NEXUS_sm21.exe
+          name: NEXUS-sm21-Fermi-GT730-Linux64
+          path: NEXUS_sm21
           if-no-files-found: error
           retention-days: 90

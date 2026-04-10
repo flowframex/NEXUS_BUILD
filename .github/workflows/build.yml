@@ -8,18 +8,15 @@ on:
 
 jobs:
   build-fermi-sm21:
-    name: "NEXUS sm_21 | CUDA 8.0 | Windows 2022"
-    runs-on: windows-latest
+    name: "NEXUS sm_21 | CUDA 8.0 | Windows 2019"
+    runs-on: windows-2019            # ← KEY FIX: 2019 = Win build 17763, CUDA 8.0 accepts it
+                                     #   windows-2022/latest = build 20348, too new → fatal error
 
     steps:
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Jimver's action has CUDA 8.0.61 as an active entry in its
-      # windows-links.ts using the correct NVIDIA redirect URL format:
-      # developer.nvidia.com/.../cuda_8.0.61_win10-exe  (note: -exe suffix)
-      # This is different from the .exe filename we were trying before.
       - name: Install CUDA 8.0.61
         uses: Jimver/cuda-toolkit@v0.2.29
         id: cuda-toolkit
@@ -27,28 +24,50 @@ jobs:
           cuda: '8.0.61'
           method: 'local'
 
-      # CUDA 8.0 host_config.h has a hard #error rejecting cl.exe > VS2015.
-      # VS 2022 (on runner) = MSC_VER 1930+, VS 2015 = 1900.
-      # Patch that one block so VS 2022 is accepted.
-      - name: Patch host_config.h (allow VS 2022 cl.exe)
+      # Patch 1 — host_config.h: remove MSC_VER > 1900 upper-bound (VS 2022 uses 1930+)
+      # Patch 2 — scan ALL headers for any "unsupported Windows" #error blocks and nuke them
+      - name: Patch CUDA 8.0 headers (compiler + OS checks)
         shell: powershell
         run: |
-          $f = "${{steps.cuda-toolkit.outputs.CUDA_PATH}}\include\host_config.h"
-          if (-not (Test-Path $f)) {
-            $f = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\include\host_config.h"
+          $cudaPath = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+          if (-not (Test-Path $cudaPath)) {
+            $cudaPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0"
           }
-          Write-Host "Patching: $f"
-          $txt = Get-Content $f -Raw
-          $txt = $txt -replace '(#if _MSC_VER > 1900\s*\r?\n\s*#error[^\r\n]*\r?\n\s*#endif)', '/* CI patch: MSC_VER upper-bound removed */'
-          Set-Content $f $txt -NoNewline
-          Write-Host "Patched OK."
+          Write-Host "CUDA root: $cudaPath"
+
+          # --- Patch 1: host_config.h MSC_VER upper bound ---
+          $hc = "$cudaPath\include\host_config.h"
+          if (Test-Path $hc) {
+            $t = Get-Content $hc -Raw
+            $t = $t -replace '(?s)(#if _MSC_VER > 1900\s*\r?\n\s*#error[^\r\n]*\r?\n\s*#endif)', `
+                              '/* CI-PATCH: MSC_VER upper-bound removed */'
+            Set-Content $hc $t -NoNewline
+            Write-Host "Patched: host_config.h"
+          } else {
+            Write-Host "WARNING: host_config.h not found at $hc"
+          }
+
+          # --- Patch 2: sweep all .h files for Windows OS #error guards ---
+          $headers = Get-ChildItem "$cudaPath\include" -Filter "*.h" -Recurse -ErrorAction SilentlyContinue
+          foreach ($h in $headers) {
+            $t = Get-Content $h.FullName -Raw -ErrorAction SilentlyContinue
+            if ($null -eq $t) { continue }
+            # Match patterns like:  #if ... \n #error ...unsupported...windows... \n #endif
+            if ($t -imatch '#error[^\n]*unsupported[^\n]*(os|windows|operating)') {
+              Write-Host "Patching OS guard in: $($h.Name)"
+              $t = $t -replace '(?si)(#if[^\n]*\n[^#]*#error[^\n]*(unsupported[^\n]*(os|windows|operating)|os[^\n]*unsupported)[^\n]*\n[^#]*#endif)', `
+                                '/* CI-PATCH: OS check removed */'
+              Set-Content $h.FullName $t -NoNewline
+            }
+          }
+          Write-Host "All patches done."
 
       - name: Set up MSVC x64
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Verify nvcc + cl.exe
+      - name: Verify tools
         shell: cmd
         run: |
           nvcc --version
@@ -61,6 +80,7 @@ jobs:
             -arch=sm_21 ^
             -O2 ^
             -Xcompiler /O2 ^
+            -Wno-deprecated-gpu-targets ^
             -o NEXUS_sm21.exe ^
             NEXUS.cu ^
             -Xlinker /subsystem:windows

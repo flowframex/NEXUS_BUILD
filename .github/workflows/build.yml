@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: "NEXUS sm_21 | CUDA 8.0 | Windows"
+    name: "NEXUS sm_21 | CUDA 8.0 | Windows + nvcc binary patch"
     runs-on: windows-latest
 
     steps:
@@ -22,43 +22,149 @@ jobs:
           cuda: '8.0.61'
           method: 'local'
 
-      - name: Patch host_config.h + wrap nvcc with OS spoof
+      # ── Patch 1: host_config.h  (MSC_VER > 1900 compile-time block) ──────
+      - name: Patch host_config.h
         shell: powershell
         run: |
-          $bin = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}\bin"
-          $inc = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}\include"
-
-          # --- 1. Patch MSC_VER check ---
-          $hc = "$inc\host_config.h"
-          $t = Get-Content $hc -Raw
-          $t = $t -replace '(?s)(#if _MSC_VER > 1900\s*\r?\n[^\n]*\r?\n[^\n]*\r?\n)', '/* PATCHED */'
+          $hc = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}\include\host_config.h"
+          $t  = Get-Content $hc -Raw
+          $t  = $t -replace '(?s)(#if _MSC_VER > 1900\s*\r?\n[^\n]*\r?\n[^\n]*\r?\n)', '/* CI-PATCH MSC_VER */'
           Set-Content $hc $t -NoNewline
           Write-Host "host_config.h patched"
 
-          # --- 2. Rename nvcc.exe → nvcc_real.exe ---
-          Rename-Item "$bin\nvcc.exe" "$bin\nvcc_real.exe" -Force
-          Write-Host "nvcc.exe renamed"
+      # ── Patch 2: binary-patch nvcc.exe (RtlGetVersion OS-check NOP) ──────
+      #
+      #  nvcc 8.0 contains code roughly like:
+      #    ...version check...
+      #    Jcc  --> error_block          ; conditional jump to error
+      #    [normal compilation path]
+      #    error_block:
+      #    LEA  RCX, "Host compiler targets unsupported OS."
+      #    CALL nvcc_fatal               ; prints + exit(1)
+      #
+      #  Strategy:
+      #   1. Parse PE sections to find the RVA of the error string.
+      #   2. Scan .text for the x64 RIP-relative LEA that loads it.
+      #   3. Walk backward ≤200 bytes for the nearest conditional Jcc.
+      #   4. NOP that Jcc  →  we always fall through past the error block.
+      #   Fallback: if no Jcc found, NOP every CALL within 64 bytes of the LEA.
+      #
+      - name: Binary-patch nvcc.exe (NOP OS-version Jcc)
+        shell: python
+        run: |
+          import struct, sys, os
 
-          # --- 3. Create nvcc.bat wrapper that injects __COMPAT_LAYER ---
-          # __COMPAT_LAYER=WIN81RTM makes Windows shim RtlGetVersion
-          # so nvcc_real.exe sees Windows 8.1 instead of Server 2022
-          $bat  = "@echo off`r`n"
-          $bat += "set __COMPAT_LAYER=WIN81RTM`r`n"
-          $bat += "`"$bin\nvcc_real.exe`" %*`r`n"
-          Set-Content "$bin\nvcc.bat" $bat -NoNewline
-          Write-Host "nvcc.bat wrapper created:"
-          Get-Content "$bin\nvcc.bat"
+          path = r"${{ steps.cuda-toolkit.outputs.CUDA_PATH }}\bin\nvcc.exe"
+          if not os.path.exists(path):
+              path = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\bin\nvcc.exe"
+          print(f"Patching: {path}")
+
+          with open(path, 'rb') as f:
+              data = bytearray(f.read())
+
+          # ── PE section table ─────────────────────────────────────────────
+          e_lfanew = struct.unpack_from('<I', data, 0x3C)[0]
+          nsec     = struct.unpack_from('<H', data, e_lfanew + 6)[0]
+          optsz    = struct.unpack_from('<H', data, e_lfanew + 20)[0]
+          sec0     = e_lfanew + 4 + 20 + optsz
+
+          secs = []
+          for i in range(nsec):
+              o = sec0 + i * 40
+              secs.append(dict(
+                  name  = data[o:o+8].rstrip(b'\x00').decode('ascii','replace'),
+                  va    = struct.unpack_from('<I', data, o + 12)[0],
+                  vsz   = struct.unpack_from('<I', data, o + 16)[0],
+                  ro    = struct.unpack_from('<I', data, o + 20)[0],
+                  rsz   = struct.unpack_from('<I', data, o + 16)[0],
+              ))
+
+          def off2rva(off):
+              for s in secs:
+                  if s['ro'] <= off < s['ro'] + s['rsz']:
+                      return s['va'] + (off - s['ro'])
+              return None
+
+          # ── Find error string ─────────────────────────────────────────────
+          msg = b'Host compiler targets unsupported OS.'
+          si  = data.find(msg)
+          assert si >= 0, "ERROR: string not found in binary!"
+          str_rva = off2rva(si)
+          print(f"  String  file=0x{si:08X}  rva=0x{str_rva:08X}")
+
+          # ── Find .text section (lowest VA, below string) ──────────────────
+          code_secs = [s for s in secs if s['va'] < str_rva and s['rsz'] > 0]
+          assert code_secs, "No code section found!"
+          text = min(code_secs, key=lambda s: abs(str_rva - s['va']))
+          ts, te = text['ro'], text['ro'] + text['rsz']
+          print(f"  .text   ro=0x{ts:08X}..0x{te:08X}  va=0x{text['va']:08X}")
+
+          # ── Scan .text for RIP-relative LEA referencing str_rva ──────────
+          # x64 pattern: REX(48|4C) 8D ModRM(mod=00,rm=101) disp32
+          refs = []
+          for i in range(ts, te - 7):
+              if data[i] in (0x48, 0x4C, 0x49, 0x4D) and data[i+1] == 0x8D:
+                  if (data[i+2] & 0xC7) == 0x05:
+                      disp = struct.unpack_from('<i', data, i + 3)[0]
+                      irva = off2rva(i)
+                      if irva and (irva + 7 + disp) == str_rva:
+                          refs.append(i)
+                          print(f"  LEA ref at file=0x{i:08X}")
+
+          assert refs, "ERROR: no LEA references to error string found!"
+
+          patched = 0
+          for ref in refs:
+              # ── Walk backward for Jcc ────────────────────────────────────
+              lo = max(ts, ref - 200)
+              for i in range(ref - 2, lo - 1, -1):
+                  b = data[i]
+                  # Short Jcc: 70..7F  disp8
+                  if 0x70 <= b <= 0x7F:
+                      print(f"  NOP short Jcc 0x{b:02X} at 0x{i:08X}")
+                      data[i]   = 0x90   # NOP
+                      data[i+1] = 0x90   # NOP
+                      patched += 1
+                      break
+                  # Near  Jcc: 0F 80..8F  disp32
+                  if 0x80 <= b <= 0x8F and i > 0 and data[i-1] == 0x0F:
+                      print(f"  NOP near Jcc 0F {b:02X} at 0x{i-1:08X}")
+                      for k in range(6):
+                          data[i - 1 + k] = 0x90
+                      patched += 1
+                      break
+
+          # ── Fallback: NOP every CALL near the LEA ────────────────────────
+          if patched == 0:
+              print("  Jcc not found; NOPing CALL(s) near LEA as fallback")
+              for ref in refs:
+                  for j in range(ref, min(ref + 64, te - 4)):
+                      if data[j] == 0xE8:                  # CALL rel32
+                          print(f"  NOP CALL at 0x{j:08X}")
+                          for k in range(5): data[j + k] = 0x90
+                          patched += 1
+                          # also NOP next CALL (likely exit())
+                          for j2 in range(j + 5, min(j + 48, te - 4)):
+                              if data[j2] == 0xE8:
+                                  print(f"  NOP 2nd CALL at 0x{j2:08X}")
+                                  for k in range(5): data[j2 + k] = 0x90
+                                  break
+                          break
+
+          assert patched > 0, "PATCH FAILED: nothing to NOP found!"
+
+          with open(path, 'wb') as f:
+              f.write(data)
+          print(f"  SUCCESS — {patched} location(s) patched.")
 
       - name: Set up MSVC x64
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Verify tools
+      - name: Verify nvcc
         shell: cmd
-        run: |
-          nvcc --version
-          cl.exe 2>&1 | findstr /i "version"
+        run: nvcc --version
 
       - name: Compile NEXUS
         shell: cmd
@@ -70,7 +176,8 @@ jobs:
             -Wno-deprecated-gpu-targets ^
             -o NEXUS_sm21.exe ^
             NEXUS.cu ^
-            -Xlinker /subsystem:windows
+            -Xlinker /subsystem:windows ^
+            -Xlinker /ENTRY:mainCRTStartup
 
       - name: Upload NEXUS_sm21.exe
         uses: actions/upload-artifact@v4

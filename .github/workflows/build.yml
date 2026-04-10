@@ -30,7 +30,7 @@ jobs:
       - name: Setup CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.17
         with:
-          cuda: '11.4.0'
+          cuda: '10.2.89'
 
       - name: Verify CUDA toolchain
         shell: pwsh
@@ -44,7 +44,8 @@ jobs:
         run: |
           nvcc ^
             -O3 ^
-            -arch=sm_35 ^
+            -gencode arch=compute_35,code=sm_35 ^
+            -gencode arch=compute_35,code=compute_35 ^
             -cudart static ^
             -allow-unsupported-compiler ^
             -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH ^
@@ -100,5 +101,8 @@ jobs:
 
             ### Requirements
             - Windows OS
-            - CUDA-compatible GPU
-            - Built with CUDA 11.4 compatibility workaround
+            - CUDA-compatible GPU (Kepler CC3.5+ — GT 730 GK208, GTX 650 and newer)
+            - NVIDIA driver **≥ 441.22** (CUDA 10.2 runtime)
+            - Built with CUDA 10.2 targeting sm_35 (native) + compute_35 PTX (JIT fallback)
+
+            > **Note for true Fermi (CC2.1) GPUs:** You need a local build with CUDA 8.0 and `-arch=sm_21`.

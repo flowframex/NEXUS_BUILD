@@ -26,11 +26,24 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+          toolset: 14.1        # VS 2017 (v141) — last toolset CUDA 8.0 tolerates with -allow-unsupported-compiler
 
-      - name: Setup CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.17
-        with:
-          cuda: '11.8.0'
+      - name: Install CUDA 8.0 Toolkit
+        shell: pwsh
+        run: |
+          # CUDA 8.0 Patch 2 — last release supporting Fermi CC2.1
+          # Runtime requires driver >= 367.48 (well within GT 730 Fermi driver range)
+          $url  = "https://developer.download.nvidia.com/compute/cuda/8.0/Prod2/local_installers/cuda_8.0.61_win10.exe"
+          $dest = "$env:TEMP\cuda80.exe"
+          Write-Host "Downloading CUDA 8.0 local installer..."
+          (New-Object Net.WebClient).DownloadFile($url, $dest)
+          Write-Host "Installing (compiler + runtime only)..."
+          Start-Process -Wait -FilePath $dest -ArgumentList "-s","compiler_8.0","cudart_8.0"
+          $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\bin"
+          $cudaInc = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\include"
+          echo $cudaBin                                        >> $env:GITHUB_PATH
+          echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0" >> $env:GITHUB_ENV
+          echo "CUDA_INC=$cudaInc"                            >> $env:GITHUB_ENV
 
       - name: Verify CUDA toolchain
         shell: pwsh
@@ -43,17 +56,14 @@ jobs:
         shell: cmd
         run: |
           nvcc ^
-            -O3 ^
-            --std=c++17 ^
-            -gencode arch=compute_35,code=sm_35 ^
-            -gencode arch=compute_35,code=compute_35 ^
+            -O2 ^
+            -arch=sm_21 ^
             -cudart static ^
             -allow-unsupported-compiler ^
             -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH ^
-            -Wno-deprecated-gpu-targets ^
             NEXUS.cu ^
             -o NEXUS.exe ^
-            -Xcompiler "/MT /EHsc /W3 /WX- /std:c++17 /D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" ^
+            -Xcompiler "/MT /EHsc /W3 /WX- /D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" ^
             -luser32 -lgdi32
 
       - name: Verify exe was produced
@@ -101,9 +111,9 @@ jobs:
             **VRAM-native Frame Generation Engine**
 
             ### Requirements
-            - Windows OS
-            - CUDA-compatible GPU (Kepler CC3.5+ — GT 730 GK208, GTX 650 and newer)
-            - NVIDIA driver **≥ 452.39** (GT 730 R470 branch satisfies this — check nvidia.com/drivers)
-            - Built with CUDA 11.8 targeting sm_35 (native) + compute_35 PTX (JIT fallback)
+            - Windows 10/11 (64-bit)
+            - NVIDIA **Fermi or newer** GPU (GT 730 GF108 CC2.1 is the primary target)
+            - NVIDIA driver **≥ 367.48**  (any driver from the last GT 730 Fermi era works)
+            - Built with CUDA 8.0 targeting **sm_21** (Fermi CC2.1 native)
 
-            > **Note for true Fermi (CC2.1) GPUs:** You need a local build with CUDA 8.0 and `-arch=sm_21`.
+            > Kepler / Maxwell / Pascal / Turing / Ampere GPUs are also supported (CC2.1+ binary runs on all).

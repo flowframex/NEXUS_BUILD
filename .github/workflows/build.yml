@@ -1,4 +1,4 @@
-name: Build NEXUS  (sm_21 Fermi GT 730)
+name: Build NEXUS (sm_21 Fermi GT 730)
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-fermi-sm21:
-    name: "NEXUS -> sm_21 | CUDA 8.0 | Windows 2022"
+    name: "NEXUS sm_21 | CUDA 8.0 | Windows 2022"
     runs-on: windows-latest
 
     steps:
@@ -21,16 +21,35 @@ jobs:
         with:
           arch: x64
 
-      - name: Download CUDA 8.0.61
+      # NVIDIA removed the network installer from public CDN.
+      # Use the local installer (~1.4 GB) via curl -L which follows
+      # NVIDIA's redirect chain to the actual file on their CDN.
+      # Two URLs tried in order — first CDN direct, then redirect.
+      - name: Download CUDA 8.0.61 local installer
         shell: powershell
         run: |
-          $url = "https://developer.download.nvidia.com/compute/cuda/8.0/Prod2/network_installers/cuda_8.0.61_win10_network.exe"
-          Write-Host "Downloading CUDA 8.0.61..."
-          Invoke-WebRequest -Uri $url -OutFile "cuda_installer.exe" -UseBasicParsing
-          $mb = [math]::Round((Get-Item cuda_installer.exe).Length / 1MB, 1)
-          Write-Host "Done - $mb MB"
+          $urls = @(
+            "https://developer.download.nvidia.com/compute/cuda/8.0/Prod2/local_installers/cuda_8.0.61_windows.exe",
+            "https://developer.nvidia.com/compute/cuda/8.0/Prod2/local_installers/cuda_8.0.61_windows"
+          )
+          $downloaded = $false
+          foreach ($url in $urls) {
+            Write-Host "Trying: $url"
+            curl.exe -L --retry 3 --retry-delay 5 -o cuda_installer.exe $url
+            if ($LASTEXITCODE -eq 0 -and (Test-Path cuda_installer.exe) -and (Get-Item cuda_installer.exe).Length -gt 10MB) {
+              Write-Host "Downloaded OK - $([math]::Round((Get-Item cuda_installer.exe).Length/1MB,1)) MB"
+              $downloaded = $true
+              break
+            }
+            Write-Host "Failed or file too small, trying next URL..."
+            Remove-Item -Force cuda_installer.exe -ErrorAction SilentlyContinue
+          }
+          if (-not $downloaded) {
+            Write-Error "All CUDA 8.0 download URLs failed. See README for manual upload option."
+            exit 1
+          }
 
-      - name: Install CUDA 8.0  (nvcc + cudart only)
+      - name: Install CUDA 8.0 (nvcc + cudart only, no driver)
         shell: powershell
         run: |
           $p = Start-Process ".\cuda_installer.exe" `
@@ -53,14 +72,13 @@ jobs:
           Add-Content $env:GITHUB_PATH $bin
           Write-Host "PATH += $bin"
 
-      - name: Patch host_config.h  (allow VS 2022 cl.exe)
+      # CUDA 8.0 host_config.h has a hard error for cl.exe newer than VS 2015.
+      # Patch it out so VS 2022 (pre-installed on runner) is accepted.
+      - name: Patch host_config.h (allow VS 2022 cl.exe)
         shell: powershell
         run: |
           $f = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\include\host_config.h"
-          if (-not (Test-Path $f)) {
-            Write-Error "Not found: $f"
-            exit 1
-          }
+          if (-not (Test-Path $f)) { Write-Error "Not found: $f"; exit 1 }
           $txt = Get-Content $f -Raw
           $txt = $txt -replace `
             '(#if _MSC_VER > 1900\s*\r?\n\s*#error[^\r\n]*\r?\n\s*#endif)', `
@@ -74,7 +92,7 @@ jobs:
           nvcc --version
           cl.exe 2>&1 | findstr /i "version"
 
-      - name: Compile NEXUS  (sm_21 Fermi)
+      - name: Compile NEXUS (sm_21 Fermi)
         shell: cmd
         run: |
           nvcc ^

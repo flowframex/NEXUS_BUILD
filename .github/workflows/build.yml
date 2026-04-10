@@ -16,75 +16,37 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Jimver's action has CUDA 8.0.61 as an active entry in its
+      # windows-links.ts using the correct NVIDIA redirect URL format:
+      # developer.nvidia.com/.../cuda_8.0.61_win10-exe  (note: -exe suffix)
+      # This is different from the .exe filename we were trying before.
+      - name: Install CUDA 8.0.61
+        uses: Jimver/cuda-toolkit@v0.2.29
+        id: cuda-toolkit
+        with:
+          cuda: '8.0.61'
+          method: 'local'
+
+      # CUDA 8.0 host_config.h has a hard #error rejecting cl.exe > VS2015.
+      # VS 2022 (on runner) = MSC_VER 1930+, VS 2015 = 1900.
+      # Patch that one block so VS 2022 is accepted.
+      - name: Patch host_config.h (allow VS 2022 cl.exe)
+        shell: powershell
+        run: |
+          $f = "${{steps.cuda-toolkit.outputs.CUDA_PATH}}\include\host_config.h"
+          if (-not (Test-Path $f)) {
+            $f = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\include\host_config.h"
+          }
+          Write-Host "Patching: $f"
+          $txt = Get-Content $f -Raw
+          $txt = $txt -replace '(#if _MSC_VER > 1900\s*\r?\n\s*#error[^\r\n]*\r?\n\s*#endif)', '/* CI patch: MSC_VER upper-bound removed */'
+          Set-Content $f $txt -NoNewline
+          Write-Host "Patched OK."
+
       - name: Set up MSVC x64
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-
-      # NVIDIA removed the network installer from public CDN.
-      # Use the local installer (~1.4 GB) via curl -L which follows
-      # NVIDIA's redirect chain to the actual file on their CDN.
-      # Two URLs tried in order — first CDN direct, then redirect.
-      - name: Download CUDA 8.0.61 local installer
-        shell: powershell
-        run: |
-          $urls = @(
-            "https://developer.download.nvidia.com/compute/cuda/8.0/Prod2/local_installers/cuda_8.0.61_windows.exe",
-            "https://developer.nvidia.com/compute/cuda/8.0/Prod2/local_installers/cuda_8.0.61_windows"
-          )
-          $downloaded = $false
-          foreach ($url in $urls) {
-            Write-Host "Trying: $url"
-            curl.exe -L --retry 3 --retry-delay 5 -o cuda_installer.exe $url
-            if ($LASTEXITCODE -eq 0 -and (Test-Path cuda_installer.exe) -and (Get-Item cuda_installer.exe).Length -gt 10MB) {
-              Write-Host "Downloaded OK - $([math]::Round((Get-Item cuda_installer.exe).Length/1MB,1)) MB"
-              $downloaded = $true
-              break
-            }
-            Write-Host "Failed or file too small, trying next URL..."
-            Remove-Item -Force cuda_installer.exe -ErrorAction SilentlyContinue
-          }
-          if (-not $downloaded) {
-            Write-Error "All CUDA 8.0 download URLs failed. See README for manual upload option."
-            exit 1
-          }
-
-      - name: Install CUDA 8.0 (nvcc + cudart only, no driver)
-        shell: powershell
-        run: |
-          $p = Start-Process ".\cuda_installer.exe" `
-                 -ArgumentList "-s nvcc_8.0 cudart_8.0" `
-                 -PassThru -Wait
-          if ($p.ExitCode -ne 0) {
-            Write-Error "CUDA install failed with exit code $($p.ExitCode)"
-            exit 1
-          }
-          Write-Host "CUDA 8.0 installed."
-
-      - name: Add CUDA 8.0 to PATH
-        shell: powershell
-        run: |
-          $bin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\bin"
-          if (-not (Test-Path $bin)) {
-            Write-Error "CUDA bin not found: $bin"
-            exit 1
-          }
-          Add-Content $env:GITHUB_PATH $bin
-          Write-Host "PATH += $bin"
-
-      # CUDA 8.0 host_config.h has a hard error for cl.exe newer than VS 2015.
-      # Patch it out so VS 2022 (pre-installed on runner) is accepted.
-      - name: Patch host_config.h (allow VS 2022 cl.exe)
-        shell: powershell
-        run: |
-          $f = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v8.0\include\host_config.h"
-          if (-not (Test-Path $f)) { Write-Error "Not found: $f"; exit 1 }
-          $txt = Get-Content $f -Raw
-          $txt = $txt -replace `
-            '(#if _MSC_VER > 1900\s*\r?\n\s*#error[^\r\n]*\r?\n\s*#endif)', `
-            '/* CI patch: MSC_VER upper-bound removed */'
-          Set-Content $f $txt -NoNewline
-          Write-Host "host_config.h patched."
 
       - name: Verify nvcc + cl.exe
         shell: cmd
